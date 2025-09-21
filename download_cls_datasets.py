@@ -12,7 +12,7 @@ except ImportError:
     
 from utils.misc_utils import bcolors
     
-def setup_kaggle_api():
+def setup_kaggle_api()->KaggleApi:
     """
     Initialize and authenticate Kaggle API.
     
@@ -33,7 +33,7 @@ def setup_kaggle_api():
         print("3. Your kaggle.json contains valid API credentials")
         sys.exit(1)
         
-def extract_dataset_info(kaggle_link):
+def extract_dataset_info(kaggle_link: str):
     """
     Extract username and dataset name from Kaggle URL or direct reference.
     
@@ -62,7 +62,13 @@ def extract_dataset_info(kaggle_link):
     
     raise ValueError(f"Could not parse dataset info from: {kaggle_link}")
 
-def download_dataset(api, username, dataset_name, download_path, unzip=True):
+def download_dataset(
+    api: KaggleApi, 
+    username: str, 
+    dataset_name: str, 
+    download_path: Path, 
+    unzip: bool=True
+):
     """
     Download and optionally extract Kaggle dataset.
     
@@ -70,7 +76,7 @@ def download_dataset(api, username, dataset_name, download_path, unzip=True):
         api (KaggleApi): Authenticated Kaggle API instance
         username (str): Dataset owner username
         dataset_name (str): Dataset name
-        download_dir (str): Local directory to download to
+        download_path (Path): Local directory to download to
         unzip (bool): Whether to extract zip files
     """
     dataset_ref = f"{username}/{dataset_name}"
@@ -92,7 +98,7 @@ def download_dataset(api, username, dataset_name, download_path, unzip=True):
         
         # Try to get more specific error information
         try:
-            dataset_info = api.dataset_view(dataset_ref)
+            dataset_info = api.dataset_metadata(dataset_ref, str(download_path))
             print(f"Dataset exists: {dataset_info.title}")
             print("This might be a permissions or network issue.")
         except:
