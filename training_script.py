@@ -30,8 +30,11 @@ class SummaryWriter:
         
         if update_iter:
             self.iter += 1
+            
+    def close(self):
+        self.writer.close()
 
-class CCIC(Dataset):
+class ImageDataset(Dataset):
     def __init__(self, dir: Path, label: int, transform=None):
         self.data_dir = dir
         self.images = list(dir.iterdir())
@@ -159,7 +162,24 @@ def visualize_predictions(model: torch.nn.Module, test_loader: DataLoader, devic
 
     if is_training:
         model.train()
+        
+def create_image_dataset(
+    data_dir: Path, 
+    split_name: str, 
+    dataset_name: str, 
+    transform: transforms.Compose
+)->Dataset:
+    negative_data_path = data_dir / f'{dataset_name}/{split_name}/negative'
+    positive_data_path = data_dir / f'{dataset_name}/{split_name}/positive'
     
+    # Creating dataset objects with transforms
+    negative_dataset = ImageDataset(negative_data_path, label=0, transform=transform)
+    positive_dataset = ImageDataset(positive_data_path, label=1, transform=transform)
+
+    # Combine datasets
+    full_dataset = ConcatDataset([negative_dataset, positive_dataset])
+    return full_dataset
+        
 def main(
     data_dir: Path,
     run_dir: Path,
@@ -170,14 +190,14 @@ def main(
     epochs: int,
     weight_decay: float,
     warm_epochs: int,
-    lr_decay_step: float,
+    lr_decay_step: int,
     lr_decay_gamma: float,
     seed: int,
     num_workers: int
 ):
     np.random.seed(seed)
-    torch.random.seed(seed)
-    torch.cuda.random.seed(seed)
+    torch.random.manual_seed(seed)
+    torch.cuda.random.manual_seed(seed)
 
     # Define transforms for preprocessing
     transform = transforms.Compose([
@@ -197,46 +217,25 @@ def main(
 
     if 'CCIC' in datasets or 'all' in datasets:
         # Replace the paths with your dataset paths
-        negative_data_path = data_dir / 'CCIC/Negative'
-        positive_data_path = data_dir / 'CCIC/Positive'
-
-        # Creating dataset objects with transforms
-        negative_dataset = CCIC(negative_data_path, label=0, transform=transform)
-        positive_dataset = CCIC(positive_data_path, label=1, transform=transform)
-
-        # Combine datasets
-        full_dataset = ConcatDataset([negative_dataset, positive_dataset])
-
-        # Create indices for train/test split
-        indices = list(range(len(full_dataset)))
-        train_indices, test_indices = train_test_split(
-            indices, 
-            test_size=0.2, 
-            random_state=seed,
-            shuffle=True
-        )
-        train_indices, val_indices = train_test_split(
-            train_indices, 
-            test_size=0.1, 
-            random_state=seed,
-            shuffle=True
-        )
-
-        datasets_objects['train'].append(Subset(full_dataset, train_indices))
-        datasets_objects['test'].append(Subset(full_dataset, test_indices))
-        datasets_objects['val'].append(Subset(full_dataset, val_indices))
+        for split_name in datasets_objects:
+            datasets_objects[split_name].append(create_image_dataset(data_dir, split_name, 'CCIC', transform))
+            
+    if 'SouthAfricanHighway' in datasets or 'all' in datasets:
+        # Replace the paths with your dataset paths
+        for split_name in datasets_objects:
+            datasets_objects[split_name].append(create_image_dataset(data_dir, split_name, 'SouthAfricanHighway', transform))
 
     if 'GAPSv1' in datasets or 'GAPSv2' in datasets or 'all' in datasets:
-
+        pass
 
 
     # Create data loaders
-    train_loader = DataLoader(ConcatDataset(datasets['train']), batch_size=batch_size, shuffle=True, num_workers=num_workers)
-    val_loader = DataLoader(ConcatDataset(datasets['val']), batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    test_loader = DataLoader(ConcatDataset(datasets['test']), batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    train_loader = DataLoader(ConcatDataset(datasets_objects['train']), batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    val_loader = DataLoader(ConcatDataset(datasets_objects['val']), batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    test_loader = DataLoader(ConcatDataset(datasets_objects['test']), batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
     # Load pretrained ResNet50 model
-    model = models.resnet50(pretrained=pretrained)
+    model = models.resnet18(pretrained=pretrained)
     
     # Modify the final layer for binary classification
     num_features = model.fc.in_features
@@ -317,7 +316,7 @@ def main(
 
         # Evaluate
         val_loss, val_acc = evaluate_model(model, val_loader, criterion, device)
-        writer.add_scalars({'val/loss': val_loss, 'val/acc': val_acc})
+        writer.add_scalars({'val/loss': val_loss, 'val/acc': val_acc}, update_iter=False)
         
         # Store metrics
         train_losses.append(train_loss)
@@ -336,8 +335,10 @@ def main(
             print(f'New best model saved with validation accuracy: {val_acc:.2f}%')
             torch.save(best_model_state, out_file)
         
+        writer.add_scalars({'lr': scheduler.get_last_lr()[0]})
         scheduler.step()
-
+    writer.close()
+    
     # Load best model
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
@@ -388,7 +389,7 @@ if __name__ == '__main__':
     parser.add_argument('--lr', default=0.0001, type=float, help='Learning rate')
     parser.add_argument('--pretrained', action='store_true', help='Finetune last layer with IMAGENET1K_V1 backbone weights')
     parser.add_argument('--epochs', default=100, type=int, help='Total training epochs')
-    parser.add_argument('--weight-decay', type=float, help='Weight decay, leave empty to not apply weight decay')
+    parser.add_argument('--weight-decay', type=float, default=0, help='Weight decay, leave empty to not apply weight decay')
     parser.add_argument('--warmup-epochs', type=float, default=5, help='Learning rate warmup epochs')
     parser.add_argument('--lr-decay-step', type=int, default=5, help='Reduce learning rate after `step` epochs')
     parser.add_argument('--lr-decay-gamma', type=int, default=5, help='Learning rate decay rate (multiplicative factor)')
@@ -403,7 +404,7 @@ if __name__ == '__main__':
         args.pretrained,
         args.epochs,
         args.weight_decay,
-        args.warm_epochs,
+        args.warmup_epochs,
         args.lr_decay_step,
         args.lr_decay_gamma,
         args.seed,
