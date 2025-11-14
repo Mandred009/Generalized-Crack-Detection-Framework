@@ -11,7 +11,7 @@ from argparse import ArgumentParser
 from pathlib import Path
 
 import torch
-from torch.utils.data import Dataset, DataLoader, Subset, ConcatDataset
+from torch.utils.data import Dataset, DataLoader, ConcatDataset
 from torchvision import transforms, models
 import torch.nn as nn
 import torch.optim as optim
@@ -104,8 +104,11 @@ def evaluate_model(
     Evaluation function
     '''
     model.eval()
-    running_loss = 0.0
     correct = 0
+    running_loss = 0.0
+    true_positives = 0
+    false_positives = 0
+    false_negatives = 0
     total = 0
     
     for images, labels in tqdm(test_loader, desc="Evaluating"):
@@ -119,13 +122,25 @@ def evaluate_model(
         _, predicted = torch.max(outputs.data, 1)
         total += labels.size(0)
         correct += (predicted == labels).sum().item()
+        
+        pos_pred = predicted == 1
+        pos_gt = labels == 1
+        true_positives += (pos_pred == pos_gt).sum().item()
+        false_positives += (pos_pred & ~pos_gt).sum().item()
+        false_negatives += (~pos_pred & pos_gt).sum().item()
     
     epoch_loss = running_loss / len(test_loader)
     epoch_acc = 100 * correct / total
     
-    return epoch_loss, epoch_acc
+    return epoch_loss, epoch_acc, true_positives, false_positives, false_negatives
 
-def visualize_predictions(model: torch.nn.Module, test_loader: DataLoader, device: str, num_samples:int=6):
+def visualize_predictions(
+    model: torch.nn.Module, 
+    test_loader: DataLoader, 
+    run_dir: Path,
+    device: str, 
+    num_samples:int = 6
+):
     '''
     Test the model on a few samples
     '''
@@ -158,7 +173,7 @@ def visualize_predictions(model: torch.nn.Module, test_loader: DataLoader, devic
         axes[i].axis('off')
     
     plt.tight_layout()
-    fig.savefig('vis_pred.png')
+    fig.savefig(run_dir / 'vis_pred.png')
 
     if is_training:
         model.train()
@@ -179,11 +194,53 @@ def create_image_dataset(
     # Combine datasets
     full_dataset = ConcatDataset([negative_dataset, positive_dataset])
     return full_dataset
+
+def get_datasets(data_dir: Path, train_datasets: list, test_datasets: list, transform: transforms.Compose):
+    if 'all' in train_datasets:
+        train_datasets = ['CCIC', 'SouthAfricanHighway', 'GAPSv1', 'GAPSv2']
+        
+    if 'all' in test_datasets:
+        test_datasets = ['CCIC', 'SouthAfricanHighway', 'GAPSv1', 'GAPSv2']
+
+    datasets_objects = {
+        'train': [],
+        'test': [],
+        'val': [],
+    }
+
+    if 'CCIC' in train_datasets:
+        datasets_objects['train'].append(create_image_dataset(data_dir, 'train', 'CCIC', transform))
+        datasets_objects['val'].append(create_image_dataset(data_dir, 'val', 'CCIC', transform))
+        
+    if 'SouthAfricanHighway' in train_datasets:
+        datasets_objects['train'].append(create_image_dataset(data_dir, 'train', 'SouthAfricanHighway', transform))
+        datasets_objects['val'].append(create_image_dataset(data_dir, 'val', 'SouthAfricanHighway', transform))
+        
+    if 'CCIC' in test_datasets:
+        if 'CCIC' not in train_datasets:
+            datasets_objects['test'].append(create_image_dataset(data_dir, 'train', 'CCIC', transform))
+            datasets_objects['test'].append(create_image_dataset(data_dir, 'val', 'CCIC', transform))
+        datasets_objects['test'].append(create_image_dataset(data_dir, 'test', 'CCIC', transform))
+            
+        
+    if 'SouthAfricanHighway' in test_datasets:
+        if 'SouthAfricanHighway' not in train_datasets:
+            datasets_objects['test'].append(create_image_dataset(data_dir, 'train', 'SouthAfricanHighway', transform))
+            datasets_objects['test'].append(create_image_dataset(data_dir, 'val', 'SouthAfricanHighway', transform))
+        datasets_objects['test'].append(create_image_dataset(data_dir, 'test', 'SouthAfricanHighway', transform))
+
+
+    if 'GAPSv1' in train_datasets or 'GAPSv2' in train_datasets:
+        pass # TODO
+    
+    return datasets_objects
         
 def main(
     data_dir: Path,
     run_dir: Path,
-    datasets: list[str],
+    train_datasets: list[str],
+    test_datasets: list[str],
+    backbone: str,
     batch_size: int,
     lr: float,
     pretrained: bool,
@@ -208,26 +265,8 @@ def main(
         transforms.Normalize(mean=[0.485, 0.456, 0.406], 
                              std=[0.229, 0.224, 0.225])  # ImageNet normalization
     ])
-
-    datasets_objects = {
-        'train': [],
-        'test': [],
-        'val': [],
-    }
-
-    if 'CCIC' in datasets or 'all' in datasets:
-        # Replace the paths with your dataset paths
-        for split_name in datasets_objects:
-            datasets_objects[split_name].append(create_image_dataset(data_dir, split_name, 'CCIC', transform))
-            
-    if 'SouthAfricanHighway' in datasets or 'all' in datasets:
-        # Replace the paths with your dataset paths
-        for split_name in datasets_objects:
-            datasets_objects[split_name].append(create_image_dataset(data_dir, split_name, 'SouthAfricanHighway', transform))
-
-    if 'GAPSv1' in datasets or 'GAPSv2' in datasets or 'all' in datasets:
-        pass
-
+    
+    datasets_objects = get_datasets(data_dir, train_datasets, test_datasets, transform)
 
     # Create data loaders
     train_loader = DataLoader(ConcatDataset(datasets_objects['train']), batch_size=batch_size, shuffle=True, num_workers=num_workers)
@@ -235,7 +274,12 @@ def main(
     test_loader = DataLoader(ConcatDataset(datasets_objects['test']), batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
     # Load pretrained ResNet50 model
-    model = models.resnet18(pretrained=pretrained)
+    if backbone == 'resnet18':
+        model = models.resnet18(pretrained=pretrained)
+    elif backbone == 'resnet50':
+        model = models.resnet50(pretrained=pretrained)
+    else:
+        raise ValueError(f'Unknown backbone {backbone}')
     
     # Modify the final layer for binary classification
     num_features = model.fc.in_features
@@ -283,7 +327,9 @@ def main(
     train_config = {
         'data_dir': str(data_dir.resolve()),
         'run_dir': str(run_dir.resolve()),
-        'datasets': datasets,
+        'train_datasets': train_datasets,
+        'test_datasets': test_datasets,
+        'backbone': backbone,
         'batch_size': batch_size,
         'lr': lr,
         'pretrained': pretrained,
@@ -315,7 +361,7 @@ def main(
         writer.add_scalars({'train/loss': train_loss, 'train/acc': train_acc}, update_iter=False)
 
         # Evaluate
-        val_loss, val_acc = evaluate_model(model, val_loader, criterion, device)
+        val_loss, val_acc,_,_,_ = evaluate_model(model, val_loader, criterion, device)
         writer.add_scalars({'val/loss': val_loss, 'val/acc': val_acc}, update_iter=False)
         
         # Store metrics
@@ -345,7 +391,7 @@ def main(
         print(f'\nBest model loaded with validation accuracy: {best_val_acc:.2f}%')
 
     print('Evaluating model on test set')
-    test_loss, test_acc = evaluate_model(model, test_loader, criterion, device)
+    test_loss, test_acc,_,_,_ = evaluate_model(model, test_loader, criterion, device)
 
     # Plot training history
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
@@ -370,21 +416,24 @@ def main(
     ax2.grid(True)
 
     plt.tight_layout()
-    fig.savefig('metrics.png')
+    fig.savefig(run_dir / 'metrics.png')
 
     # Visualize some predictions
-    visualize_predictions(model, test_loader, device)
+    visualize_predictions(model, test_loader, run_dir, device)
 
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument('--data-dir', type=Path, required=True, help='Path to top level dataset directory')
     parser.add_argument('--run-dir', type=Path, required=True, help='Path to training run output directory')
-    parser.add_argument('--datasets', nargs='+', choices=['CCIC', 'GAPSv1', 'GAPSv2', 'SouthAfricanHighway', 'all'], default=['all'],
-                        help='List of datasets to run (choices: CCIC, GAPSv1, GAPSv2, SouthAfricanHighway, all)')
+    parser.add_argument('--train-datasets', nargs='+', choices=['CCIC', 'GAPSv1', 'GAPSv2', 'SouthAfricanHighway', 'all'], default=['all'],
+                        help='List of datasets to train with.')
+    parser.add_argument('--test-datasets', nargs='+', choices=['CCIC', 'GAPSv1', 'GAPSv2', 'SouthAfricanHighway'], default=['all'],
+                        help='List of datasets to test with. If test dataset is not also in train, then run evaluation for test dataset across all 3 splits')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--num-workers', type=int, default=os.cpu_count()-1, help='Number of worker threads')
     
     # training params
+    parser.add_argument('--backbone', default='resnet18', type=str, choices=['resnet18', 'resnet50'], help='Backbone type')
     parser.add_argument('--batch-size', default=128, type=int, help='Training/eval batch size')
     parser.add_argument('--lr', default=0.0001, type=float, help='Learning rate')
     parser.add_argument('--pretrained', action='store_true', help='Finetune last layer with IMAGENET1K_V1 backbone weights')
@@ -398,7 +447,9 @@ if __name__ == '__main__':
     main(
         args.data_dir, 
         args.run_dir,
-        args.datasets,
+        args.train_datasets,
+        args.test_datasets,
+        args.backbone,
         args.batch_size,
         args.lr,
         args.pretrained,
