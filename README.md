@@ -333,8 +333,8 @@ Key training parameters in `training_script.py`:
 
 ### Visualization Examples
 
-**SIFT Feature Clustering:**
-![SIFT Clustering](crack_area.png)
+
+![OP](crack_area.png)
 
 **Crack Measurement:**
 - Minimum width: 2.00 pixels
